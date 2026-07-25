@@ -1,226 +1,251 @@
-Totally fair, my bad. Let's slow all the way down. Forget syntax for now — let's just talk about ideas.
+# Distributed Rate Limiter
+
+A production-grade HTTP rate limiter in Go with a sliding window algorithm. Supports both in-memory (single server) and Redis-backed (distributed, multi-server) operation.
+
+Built as a Go learning project — going from zero Go experience to a working distributed system.
 
 ---
 
-## The 5 Things You Actually Need to Understand
+## Features
 
-### 1. Packages — *"Folders that know about each other"*
+- **Sliding window algorithm** — fairer than fixed windows, no boundary bursts
+- **Per-key limiting** — each IP (or any key) gets its own independent window
+- **Two backends** — swap between in-memory and Redis with one line
+- **HTTP middleware** — drop into any `net/http` server
+- **Atomic Redis operations** — Lua scripting prevents race conditions under concurrent load
+- **Background cleanup** — idle keys are automatically evicted (in-memory mode)
+- **Fail-open** — if Redis goes down, requests are allowed rather than taking your app down
 
-In TypeScript, you have files that `import` and `export` things. In Go, every file belongs to a **package** — think of it like a shared workspace. Every file in the same folder is in the same package and can see each other's stuff automatically. No imports needed between them.
+---
 
-You only import when you need something from a *different* folder/package.
+## Project Structure
 
 ```
-your-project/
-├── main.go          ← package main (the entry point)
+rate-limiter/
+├── go.mod
+├── main.go
 └── limiter/
-    └── limiter.go   ← package limiter (your rate limiter code)
+    ├── limiter.go      # core sliding window logic (single key)
+    ├── multi.go        # multi-key in-memory limiter + background cleanup
+    ├── middleware.go   # net/http middleware + Limiter interface
+    └── redis.go        # Redis-backed distributed limiter
 ```
-
-`main.go` needs to import `limiter` to use it. Files inside `limiter/` don't need to import each other.
-
-One rule: **capital letter = public, lowercase = private.** That's it. No `export` keyword. `Allow()` is public. `allow()` would be private.
 
 ---
 
-### 2. Structs — *"An object, but dumb on purpose"*
+## Prerequisites
 
-In TypeScript you'd write a class like this:
-
-```typescript
-class RateLimiter {
-  limit: number
-  window: number
-
-  allow(): boolean { ... }
-}
-```
-
-Go doesn't have classes. It splits the idea in two:
-
-- A **struct** just holds data (like a plain object)
-- **Methods** are functions you attach to that struct separately
-
-```go
-// Just the data
-type RateLimiter struct {
-    limit  int
-    window time.Duration
-}
-
-// The behaviour, attached separately
-func (r *RateLimiter) Allow() bool { ... }
-```
-
-The `(r *RateLimiter)` part before the function name is just Go's way of saying *"this function belongs to RateLimiter."* `r` is just the variable name for the struct — like `this` in TypeScript, but you name it yourself.
+- Go 1.21+
+- A Redis instance (for distributed mode)
+  - [Upstash](https://upstash.com) — free cloud Redis, no installation needed
+  - Or Docker: `docker run -d -p 6379:6379 redis`
 
 ---
 
-### 3. Pointers — *"The address of a thing, not a copy of it"*
+## Getting Started
 
-This is the biggest mindset shift from JavaScript/TypeScript.
+**1 — Clone and install dependencies**
 
-In JS, when you pass an object to a function, the function gets a reference to the same object — mutations stick. **Go is the opposite.** By default, when you pass a struct to a function, Go makes a **full copy** of it. Changes inside the function disappear when it returns.
-
-Think of it like this:
-
-> 📄 **No pointer** — you give someone a *photocopy* of a document. They write on it. Your original is untouched.
->
-> 📌 **Pointer** — you give someone the *address* of where the document lives. They go there and write on it. Your original is changed.
-
-A pointer is written with `*`. When you see `*RateLimiter`, it means *"a pointer to a RateLimiter, not a copy of one."*
-
-```go
-func (r *RateLimiter) Allow() bool {
-    // r is a pointer — changes to r.requests actually stick
-}
-```
-
-If you wrote `func (r RateLimiter)` instead, any changes inside would vanish. Our sliding window stores timestamps, so we *need* changes to stick — always use the pointer.
-
----
-
-### 4. Mutex — *"A toilet with one stall"*
-
-Imagine one toilet cubicle. When someone's inside, they lock the door. Everyone else waits. When they're done, they unlock it. The next person goes in.
-
-That's a **mutex**. It's a lock that ensures only one thing runs a piece of code at a time.
-
-Why do we need this? Because Go runs things concurrently — multiple requests can hit `Allow()` at the same time. Without a lock, two requests could both read the timestamp list simultaneously, both think they're under the limit, and both get through. The mutex prevents that.
-
-```go
-r.mu.Lock()   // lock the door — everyone else waits here
-// ... do the work ...
-r.mu.Unlock() // unlock the door — next one can go in
-```
-
-And `defer` just means *"do this when the function finishes, no matter what."* So `defer r.mu.Unlock()` means: whatever happens — even if we `return false` early — unlock the mutex when this function exits. It's a safety guarantee.
-
----
-
-### 5. Slices — *"A typed, dynamic list"*
-
-Exactly like a TypeScript array, but it declares what type it holds.
-
-```typescript
-// TypeScript
-const timestamps: Date[] = []
-timestamps.push(new Date())
-```
-
-```go
-// Go
-var timestamps []time.Time
-timestamps = append(timestamps, time.Now())
-```
-
-`append` doesn't modify the slice in place — it returns a new one, so you have to reassign it. That's just a Go quirk.
-
----
-
-## Now Let's Connect It to the Code
-
-Here's the full working code. Set it up **exactly** like this:
-
-**Step 1** — create the project:
 ```bash
-mkdir rate-limiter
+git clone https://github.com/yourusername/rate-limiter
 cd rate-limiter
-go mod init rate-limiter
-mkdir limiter
+go mod tidy
 ```
 
-**Step 2** — create `limiter/limiter.go`:
+**2 — Run in-memory mode (no Redis needed)**
+
+In `main.go`, use `NewMultiLimiter`:
 
 ```go
-package limiter
-
-import (
-	"sync"
-	"time"
-)
-
-// RateLimiter is our struct — it just holds data
-type RateLimiter struct {
-	mu       sync.Mutex  // the toilet lock
-	requests []time.Time // list of timestamps in the current window
-	limit    int         // max requests allowed
-	window   time.Duration // how long the window is
-}
-
-// New is Go's version of a constructor — returns a pointer to a fresh RateLimiter
-func New(limit int, window time.Duration) *RateLimiter {
-	return &RateLimiter{
-		limit:  limit,
-		window: window,
-	}
-}
-
-// Allow checks if a request can go through
-// (r *RateLimiter) means: this method belongs to RateLimiter, and r is a pointer so changes stick
-func (r *RateLimiter) Allow() bool {
-	r.mu.Lock()         // lock — one request at a time through here
-	defer r.mu.Unlock() // unlock when this function exits, no matter what
-
-	now := time.Now()
-	windowStart := now.Add(-r.window) // e.g. if window is 1s, this is 1 second ago
-
-	// Go through our timestamp list and keep only the ones inside the window
-	var valid []time.Time
-	for _, t := range r.requests {
-		if t.After(windowStart) {
-			valid = append(valid, t)
-		}
-	}
-	r.requests = valid // replace old list with cleaned-up list
-
-	// If we're already at the limit, reject
-	if len(r.requests) >= r.limit {
-		return false
-	}
-
-	// Otherwise, record this request and allow it
-	r.requests = append(r.requests, now)
-	return true
-}
+rl := limiter.NewMultiLimiter(5, 10*time.Second)
 ```
 
-**Step 3** — create `main.go`:
+```bash
+go run .
+```
+
+**3 — Run in distributed mode (Redis)**
+
+In `main.go`, use `NewRedisLimiter`:
 
 ```go
-package main
-
-import (
-	"fmt"
-	"time"
-
-	"rate-limiter/limiter" // importing our limiter package
-)
-
-func main() {
-	// 5 requests allowed per second
-	rl := limiter.New(5, time.Second)
-
-	// Fire 8 requests instantly — expect first 5 to pass, last 3 to fail
-	for i := 0; i < 8; i++ {
-		allowed := rl.Allow()
-		fmt.Printf("Request %d: allowed=%v\n", i+1, allowed)
-	}
-
-	fmt.Println("\nWaiting 1 second...")
-	time.Sleep(time.Second) // pause for 1 second
-
-	// Window has slid past all old timestamps — this should be allowed
-	allowed := rl.Allow()
-	fmt.Printf("Request after wait: allowed=%v\n", allowed)
-}
+rl := limiter.NewRedisLimiter("rediss://default:password@host.upstash.io:6379", 5, 10*time.Second)
 ```
 
-**Step 4** — run it:
 ```bash
 go run .
 ```
 
 ---
 
-Tell me what error you get if it doesn't run, and paste it here. Also let me know which of those 5 concepts feels fuzzy — we'll dig into it before moving on.
+## Usage
+
+### In-Memory (Single Server)
+
+```go
+import (
+    "net/http"
+    "time"
+    "rate-limiter/limiter"
+)
+
+func main() {
+    // 5 requests per 10 seconds per IP
+    ml := limiter.NewMultiLimiter(5, 10*time.Second)
+
+    // Start background goroutine — sweeps every minute, evicts keys idle for 5 minutes
+    ml.StartCleanup(1*time.Minute, 5*time.Minute)
+    defer ml.Stop()
+
+    myHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Write([]byte("hello!"))
+    })
+
+    http.Handle("/", limiter.Middleware(ml, myHandler))
+    http.ListenAndServe(":8080", nil)
+}
+```
+
+### Distributed (Redis)
+
+```go
+// Drop-in replacement for NewMultiLimiter — same Middleware works with both
+rl := limiter.NewRedisLimiter("rediss://default:password@host.upstash.io:6379", 5, 10*time.Second)
+
+http.Handle("/", limiter.Middleware(rl, myHandler))
+```
+
+### Custom Key (e.g. User ID instead of IP)
+
+The `Limiter` interface has one method — `Allow(key string) bool`. You can call it with any string as the key:
+
+```go
+// In your own handler or middleware
+userID := r.Header.Get("X-User-ID")
+if !myLimiter.Allow(userID) {
+    http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+    return
+}
+```
+
+---
+
+## How It Works
+
+### Sliding Window Algorithm
+
+Every request is stored as a timestamp. On each new request, timestamps older than the window are evicted, and the remaining count is checked against the limit. The window "slides" with every request — unlike a fixed window, there are no boundary bursts.
+
+```
+Timeline:  ──────────────────────────────────────────▶
+Requests:        ● ● ●     ●       ●
+Window:                   [──── 1s ────]   ← slides with every request
+                                       ▲ now
+```
+
+### In-Memory Mode
+
+Each key gets its own `RateLimiter` (a slice of timestamps protected by a `sync.Mutex`). A `sync.RWMutex` protects the key map — concurrent reads don't block each other, only writes do. A background goroutine sweeps idle keys on a configurable interval.
+
+### Redis Mode
+
+Each key maps to a Redis sorted set where every member is a request timestamp (score = milliseconds). On each request, a Lua script atomically:
+
+1. Removes all entries older than the window start (`ZREMRANGEBYSCORE`)
+2. Counts what's left (`ZCARD`)
+3. If under the limit, records the new request (`ZADD`) and sets a TTL (`PEXPIRE`)
+
+Running this as a Lua script means it executes atomically inside Redis — no race conditions between the count check and the write, even under heavy concurrent load.
+
+### The Limiter Interface
+
+Both backends satisfy the same interface:
+
+```go
+type Limiter interface {
+    Allow(key string) bool
+}
+```
+
+The middleware accepts any `Limiter` — swap backends without touching your handler code.
+
+---
+
+## Configuration Reference
+
+### `NewMultiLimiter(limit int, window time.Duration)`
+
+| Parameter | Description | Example |
+|---|---|---|
+| `limit` | Max requests allowed per window | `5` |
+| `window` | Length of the sliding window | `10 * time.Second` |
+
+### `StartCleanup(interval, maxIdle time.Duration)`
+
+| Parameter | Description | Example |
+|---|---|---|
+| `interval` | How often to run the sweep | `1 * time.Minute` |
+| `maxIdle` | How long a key can go unused before eviction | `5 * time.Minute` |
+
+### `NewRedisLimiter(redisURL string, limit int, window time.Duration)`
+
+| Parameter | Description | Example |
+|---|---|---|
+| `redisURL` | Full Redis connection URL | `"rediss://default:pass@host:6379"` |
+| `limit` | Max requests allowed per window | `5` |
+| `window` | Length of the sliding window | `10 * time.Second` |
+
+---
+
+## Testing
+
+Fire 7 requests at a server limited to 5 per 10 seconds:
+
+**Mac / Linux:**
+```bash
+for i in $(seq 1 7); do curl -s http://localhost:8080/; done
+```
+
+**Windows (PowerShell):**
+```powershell
+for ($i = 1; $i -le 7; $i++) { curl -s http://localhost:8080/ }
+```
+
+**Expected output:**
+```
+hello! request allowed.
+hello! request allowed.
+hello! request allowed.
+hello! request allowed.
+hello! request allowed.
+rate limit exceeded, slow down
+rate limit exceeded, slow down
+```
+
+---
+
+## Design Decisions
+
+**Why sliding window over fixed window?**
+Fixed windows allow burst traffic at window boundaries — a client can send N requests just before the window resets and N more just after, effectively doubling the allowed rate. Sliding windows prevent this entirely.
+
+**Why Lua for Redis?**
+Three separate Redis calls (remove → count → add) have a race window between the count read and the write. Two concurrent requests could both read count = 4 under a limit of 5, both add themselves, and both get through — breaking the limit. A Lua script runs atomically: nothing else executes inside Redis between the count and the add.
+
+**Why fail-open on Redis errors?**
+If Redis becomes unavailable, fail-closed (blocking all requests) takes your application down with it. Fail-open keeps the app running while you fix Redis — a better tradeoff for most production scenarios. Swap `return true` to `return false` in `redis.go` if your use case requires the opposite.
+
+**Why `RWMutex` in MultiLimiter?**
+Most operations on the key map are reads (looking up whether a key exists). A plain `Mutex` would serialise all reads, making them wait in line unnecessarily. `RWMutex` allows concurrent reads — only writes (adding new keys) require exclusive access.
+
+---
+
+## What's Next
+
+This project is part of a two-project Go learning series. The next project is a **Messaging System** — a pub/sub broker using Go channels, goroutines, and fan-out patterns. Everything built here (interfaces, goroutines, channels, select) carries straight over.
+
+---
+
+## License
+
+MIT
