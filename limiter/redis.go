@@ -1,13 +1,14 @@
 package limiter
 
 import (
-    "context"
-    "crypto/tls"
-    "fmt"
-    "time"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"time"
 
-    "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 )
+
 type RedisLimiter struct {
 	client *redis.Client
 	limit  int
@@ -16,17 +17,17 @@ type RedisLimiter struct {
 }
 
 func NewRedisLimiter(redisURL string, limit int, window time.Duration) *RedisLimiter {
-    opt, err := redis.ParseURL(redisURL)
-    if err != nil {
-        panic("invalid redis URL: " + err.Error())
-    }
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		panic("invalid redis URL: " + err.Error())
+	}
 
-    // Fix for Windows TLS verification issues
-    opt.TLSConfig = &tls.Config{
-        InsecureSkipVerify: true,
-    }
+	// Fix for Windows TLS verification issues
+	opt.TLSConfig = &tls.Config{
+		InsecureSkipVerify: true,
+	}
 
-    client := redis.NewClient(opt)
+	client := redis.NewClient(opt)
 
 	script := redis.NewScript(`
 		local key      = KEYS[1]
@@ -68,7 +69,7 @@ func (r *RedisLimiter) Allow(key string) bool {
 	// nowMs, nowNs, windowMs, r.limit — the ARGV array
 	result, err := r.script.Run(ctx, r.client, []string{key}, nowMs, nowNs, windowMs, r.limit).Int()
 	if err != nil {
-		fmt.Println("Redis error:", err) // add this
+		fmt.Println("Redis error:", err) // fail-open: log and allow the request through
 		return true
 	}
 
