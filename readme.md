@@ -35,7 +35,7 @@ rate-limiter/
 
 ## Prerequisites
 
-- Go 1.21+
+- Go 1.25+ (see `go.mod`)
 - A Redis instance (for distributed mode)
   - [Upstash](https://upstash.com) — free cloud Redis, no installation needed
   - Or Docker: `docker run -d -p 6379:6379 redis`
@@ -47,7 +47,7 @@ rate-limiter/
 **1 — Clone and install dependencies**
 
 ```bash
-git clone https://github.com/yourusername/rate-limiter
+git clone https://github.com/abubakar2906/rate-limiter
 cd rate-limiter
 go mod tidy
 ```
