@@ -7,9 +7,9 @@ import (
 
 // RateLimiter is our struct — it just holds data
 type RateLimiter struct {
-	mu       sync.Mutex  // the toilet lock
-	requests []time.Time // list of timestamps in the current window
-	limit    int         // max requests allowed
+	mu       sync.Mutex    // the toilet lock
+	requests []time.Time   // list of timestamps in the current window
+	limit    int           // max requests allowed
 	window   time.Duration // how long the window is
 }
 

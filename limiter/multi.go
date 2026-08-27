@@ -9,7 +9,7 @@ type MultiLimiter struct {
 	mu       sync.RWMutex
 	limiters map[string]*RateLimiter
 	lastSeen map[string]time.Time // tracks when each key was last used
-	done     chan struct{}         // the stop signal channel
+	done     chan struct{}        // the stop signal channel
 	limit    int
 	window   time.Duration
 }
